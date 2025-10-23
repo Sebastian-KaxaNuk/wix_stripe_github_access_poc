@@ -1,1 +1,1 @@
-# wix_stripe_github_access_poc
+# wix_stripe_github_access
