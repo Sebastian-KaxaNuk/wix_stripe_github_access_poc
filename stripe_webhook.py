@@ -1,46 +1,116 @@
-import stripe
-from config import STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
-from github_service import add_collaborator
+"""
+Stripe webhook handler for processing payment events.
 
-#%%
+This module defines a function to handle incoming webhook events from Stripe.
+When a successful checkout is completed, it can log transaction data and
+grant GitHub repository access to the user based on metadata.
+
+Functions
+---------
+handle_stripe_webhook(request)
+    Main webhook handler function.
+add_github_collaborator(username: str)
+    Invites the user to the private GitHub repository.
+"""
+
+import json
+import stripe
+import requests
+from flask import jsonify
+from config import (
+    STRIPE_SECRET_KEY,
+    STRIPE_WEBHOOK_SECRET,
+    GITHUB_TOKEN,
+    REPO_OWNER,
+    REPO_NAME,
+    logger,
+)
 
 stripe.api_key = STRIPE_SECRET_KEY
 
-#%%
+def add_github_collaborator(
+        username: str
+) -> None:
+    """
+    Grant GitHub repository access to a collaborator.
 
-def handle_stripe_event(
-        payload: bytes,
-        sig_header: str
-) -> tuple[int, str]:
+    Parameters
+    ----------
+    username : str
+        The GitHub username to invite as a collaborator.
+
+    Returns
+    -------
+    None
+        Logs the outcome of the GitHub API call.
     """
-    Valida la firma y procesa eventos de Stripe.
+    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/collaborators/{username}"
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+    }
+
+    response = requests.put(url, headers=headers, json={"permission": "pull"})
+
+    if response.status_code == 201:
+        logger.info(f"✅ Invited user '{username}' to repository {REPO_OWNER}/{REPO_NAME}.")
+    elif response.status_code == 204:
+        logger.info(f"⚠️ User '{username}' already has access to repository.")
+    else:
+        logger.error(
+            f"❌ Failed to invite '{username}'. "
+            f"Status: {response.status_code} | Response: {response.text}"
+        )
+
+
+def handle_stripe_webhook(request):
     """
+    Handle incoming Stripe webhook events and process payment completions.
+
+    Parameters
+    ----------
+    request : flask.Request
+        The Flask request object containing the webhook payload.
+
+    Returns
+    -------
+    flask.Response
+        JSON response indicating success or failure.
+    """
+    payload = request.data
+    sig_header = request.headers.get("Stripe-Signature")
+
     try:
         event = stripe.Webhook.construct_event(
             payload=payload,
             sig_header=sig_header,
-            secret=STRIPE_WEBHOOK_SECRET
+            secret=STRIPE_WEBHOOK_SECRET,
         )
-    except ValueError:
-        return 400, "Invalid payload"
-    except stripe.error.SignatureVerificationError:
-        return 400, "Invalid signature"
+    except ValueError as e:
+        logger.error(f"Invalid payload: {e}")
+        return jsonify({"error": "Invalid payload"}), 400
+    except stripe.error.SignatureVerificationError as e:
+        logger.error(f"Invalid signature: {e}")
+        return jsonify({"error": "Invalid signature"}), 400
 
-    if event["type"] == "checkout.session.completed":
+    event_type = event.get("type", "unknown")
+    logger.info(f"Received Stripe event: {event_type}")
+
+    # Log full event (optional but useful for debugging)
+    logger.debug(json.dumps(event, indent=4))
+
+    if event_type == "checkout.session.completed":
         session = event["data"]["object"]
-        custom_fields = session.get("custom_fields", [])
-        github_username = None
+        customer_email = session.get("customer_details", {}).get("email")
+        metadata = session.get("metadata", {})
 
-        for field in custom_fields:
-            if field.get("key") == "github_username":
-                github_username = field["text"]["value"].strip()
+        logger.info(f"✅ Payment completed from {customer_email}")
+        logger.info(f"🧾 Metadata: {metadata}")
 
-        if not github_username:
-            return 200, "No GitHub username provided."
+        github_username = metadata.get("github_username")
+        if github_username:
+            add_github_collaborator(github_username)
+        else:
+            logger.warning("No GitHub username found in metadata.")
 
-        ok, msg = add_collaborator(
-            github_username=github_username
-        )
-        return 200, msg if ok else f"Error: {msg}"
-
-    return 200, "Event ignored"
+    return jsonify({"status": "success"}), 200
