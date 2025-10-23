@@ -13,6 +13,8 @@ add_github_collaborator(username: str)
     Invites the user to the private GitHub repository.
 """
 
+from exceptions import SignatureError
+
 import json
 import stripe
 import requests
@@ -89,7 +91,7 @@ def handle_stripe_webhook(request):
     except ValueError as e:
         logger.error(f"Invalid payload: {e}")
         return jsonify({"error": "Invalid payload"}), 400
-    except stripe.error.SignatureVerificationError as e:
+    except SignatureError as e:
         logger.error(f"Invalid signature: {e}")
         return jsonify({"error": "Invalid signature"}), 400
 
@@ -109,7 +111,9 @@ def handle_stripe_webhook(request):
 
         github_username = metadata.get("github_username")
         if github_username:
-            add_github_collaborator(github_username)
+            add_github_collaborator(
+                username=github_username
+            )
         else:
             logger.warning("No GitHub username found in metadata.")
 
